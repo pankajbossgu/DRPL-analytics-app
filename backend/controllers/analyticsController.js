@@ -1,18 +1,13 @@
-const analyticsService = require("../services/analyticsService");
+const { generateAnalytics } = require("../services/analyticsService");
+const reportSessionStore = require("../services/reportSessionStore");
 
-const getAnalytics = async (_req, res, next) => {
+const getAnalytics = async (req, res, next) => {
   try {
-    const [stats, averageTime] = await Promise.all([
-      analyticsService.getDeliveryStats(),
-      analyticsService.getAverageDeliveryTime(),
-    ]);
+    const analytics = generateAnalytics(reportSessionStore.getRows(), req.query || {});
 
     res.status(200).json({
       success: true,
-      data: {
-        ...stats,
-        ...averageTime,
-      },
+      data: analytics,
     });
   } catch (error) {
     next(error);

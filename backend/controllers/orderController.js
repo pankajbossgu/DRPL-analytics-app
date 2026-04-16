@@ -9,13 +9,11 @@ const getOrders = async (_req, res, next) => {
   }
 };
 
-const createOrder = async (req, res, next) => {
-  try {
-    const newOrder = await orderService.createOrder(req.body);
-    res.status(201).json({ success: true, data: newOrder });
-  } catch (error) {
-    next(error);
-  }
+const createOrder = async (_req, res) => {
+  res.status(405).json({
+    success: false,
+    error: "Manual order creation is disabled. Upload CSV via /api/reports/upload.",
+  });
 };
 
 module.exports = {
