@@ -4,18 +4,12 @@ const csv = require("csv-parser");
 const fs = require("fs");
 const path = require("path");
 
-const processData = require("../services/processData");
+const { processData, TEMPLATE_HEADERS, REQUIRED_FIELDS } = require("../services/processData");
+const { generateAnalytics } = require("../services/analyticsService");
+const statusMappingStore = require("../services/statusMappingStore");
+const reportSessionStore = require("../services/reportSessionStore");
 
 const router = express.Router();
-
-const REQUIRED_HEADERS = [
-  "Store_Name",
-  "Order_ID",
-  "Order_Date",
-  "Order_Status",
-  "Product_Name",
-  "Order_Amount",
-];
 
 const uploadsDir = path.join(__dirname, "../tmp-uploads");
 if (!fs.existsSync(uploadsDir)) {
@@ -23,9 +17,7 @@ if (!fs.existsSync(uploadsDir)) {
 }
 
 const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    cb(null, uploadsDir);
-  },
+  destination: (_req, _file, cb) => cb(null, uploadsDir),
   filename: (_req, file, cb) => {
     const safeName = file.originalname.replace(/\s+/g, "-");
     cb(null, `${Date.now()}-${safeName}`);
@@ -34,41 +26,52 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
+  limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const isCsv =
-      file.mimetype === "text/csv" || path.extname(file.originalname).toLowerCase() === ".csv";
+      file.mimetype.includes("csv") || path.extname(file.originalname || "").toLowerCase() === ".csv";
 
     if (!isCsv) {
-      return cb(new Error("Invalid file type. Only CSV files are allowed."));
+      return cb(new Error("Invalid file type. Please upload a .csv file."));
     }
 
-    cb(null, true);
-  },
-  limits: {
-    fileSize: 10 * 1024 * 1024,
+    return cb(null, true);
   },
 });
 
 const parseCsvFile = (filePath) =>
   new Promise((resolve, reject) => {
     const rows = [];
-
     fs.createReadStream(filePath)
-      .pipe(csv())
-      .on("data", (data) => rows.push(data))
+      .pipe(
+        csv({
+          mapHeaders: ({ header }) => String(header || "").trim(),
+          mapValues: ({ value }) => (value === undefined || value === null ? "" : String(value).trim()),
+          skipLines: 0,
+        })
+      )
+      .on("data", (row) => rows.push(row))
       .on("end", () => resolve(rows))
       .on("error", (error) => reject(error));
   });
 
-const getMissingHeaders = (headers) => {
-  const normalizedHeaders = headers.map((header) => String(header).trim());
-  return REQUIRED_HEADERS.filter((header) => !normalizedHeaders.includes(header));
+const validateHeaders = (row = {}) => {
+  const incomingHeaders = Object.keys(row).map((item) => String(item).trim());
+  const missingRequiredHeaders = REQUIRED_FIELDS.filter((field) => !incomingHeaders.includes(field));
+
+  return {
+    incomingHeaders,
+    missingRequiredHeaders,
+    unsupportedHeaders: incomingHeaders.filter((header) => !TEMPLATE_HEADERS.includes(header)),
+  };
 };
 
 router.post("/", upload.single("file"), async (req, res, next) => {
   if (!req.file) {
-    return res.status(400).json({ error: "Missing file. Please upload a CSV file." });
+    return res.status(400).json({ error: "Missing file. Please upload CSV using field name 'file'." });
   }
+
+  const clientId = req.body.clientId || "demo-client";
 
   try {
     const parsedRows = await parseCsvFile(req.file.path);
@@ -77,22 +80,31 @@ router.post("/", upload.single("file"), async (req, res, next) => {
       return res.status(400).json({ error: "CSV file is empty." });
     }
 
-    const incomingHeaders = Object.keys(parsedRows[0]);
-    const missingHeaders = getMissingHeaders(incomingHeaders);
+    const headerCheck = validateHeaders(parsedRows[0]);
 
-    if (missingHeaders.length) {
+    if (headerCheck.missingRequiredHeaders.length) {
       return res.status(400).json({
-        error: "Invalid CSV headers.",
-        missingFields: missingHeaders,
+        error: "CSV template validation failed. Missing mandatory headers.",
+        missingHeaders: headerCheck.missingRequiredHeaders,
+        requiredHeaders: REQUIRED_FIELDS,
       });
     }
 
-    const cleanedData = await processData(parsedRows);
+    const savedMappings = await statusMappingStore.getByClientId(clientId);
+
+    const processingResult = await processData(parsedRows, { savedMappings });
+    const analytics = generateAnalytics(processingResult.processedRows);
+    reportSessionStore.setRows(processingResult.processedRows);
 
     return res.status(200).json({
-      message: "File uploaded and parsed successfully.",
-      totalRecords: cleanedData.length,
-      data: cleanedData,
+      success: true,
+      message: "File uploaded and report preview generated.",
+      templateInfo: {
+        incomingHeaders: headerCheck.incomingHeaders,
+        unsupportedHeaders: headerCheck.unsupportedHeaders,
+      },
+      ...processingResult,
+      analytics,
     });
   } catch (error) {
     return next(error);
